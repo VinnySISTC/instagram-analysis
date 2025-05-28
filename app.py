@@ -1,108 +1,99 @@
-import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { useState } from "react";
-import { Bar, Line } from "react-chartjs-2";
-import { motion } from "framer-motion";
+import streamlit as st
+import requests
+import pandas as pd
+import torch
+from transformers import BertTokenizer, BertForSequenceClassification
+from torch.nn.functional import softmax
 
-export default function FacebookDashboard() {
-  const [accessToken, setAccessToken] = useState("");
-  const [postId, setPostId] = useState("");
-  const [pageId, setPageId] = useState("");
-  const [comments, setComments] = useState([]);
-  const [sentimentData, setSentimentData] = useState(null);
-  const [engagementData, setEngagementData] = useState(null);
+# Page setup
+st.set_page_config(page_title="Instagram Post Sentiment Analyser", layout="wide")
 
-  const fetchData = async () => {
-    // Simulated sentiment data
-    setSentimentData({
-      labels: ["Positive", "Neutral", "Negative"],
-      datasets: [
-        {
-          label: "Sentiment Count",
-          data: [12, 5, 3],
-        },
-      ],
-    });
-    // Simulated engagement data
-    setEngagementData({
-      labels: ["Post 1", "Post 2", "Post 3"],
-      datasets: [
-        {
-          label: "Likes",
-          data: [100, 80, 120],
-        },
-        {
-          label: "Comments",
-          data: [20, 30, 25],
-        },
-      ],
-    });
-    setComments([
-      { text: "Love this!", sentiment: "Positive" },
-      { text: "Okay, I guess.", sentiment: "Neutral" },
-      { text: "This is bad.", sentiment: "Negative" },
-    ]);
-  };
+# Load BERT model and tokenizer
+@st.cache_resource
+def load_model():
+    tokenizer = BertTokenizer.from_pretrained("nlptown/bert-base-multilingual-uncased-sentiment")
+    model = BertForSequenceClassification.from_pretrained("nlptown/bert-base-multilingual-uncased-sentiment")
+    return tokenizer, model
 
-  return (
-    <motion.div
-      className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-3"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-    >
-      <Card className="col-span-full">
-        <CardContent className="flex flex-col gap-4 md:flex-row md:items-end">
-          <Input
-            placeholder="Access Token"
-            value={accessToken}
-            onChange={(e) => setAccessToken(e.target.value)}
-          />
-          <Input
-            placeholder="Facebook Post ID"
-            value={postId}
-            onChange={(e) => setPostId(e.target.value)}
-          />
-          <Input
-            placeholder="Page ID (for Insights)"
-            value={pageId}
-            onChange={(e) => setPageId(e.target.value)}
-          />
-          <Button onClick={fetchData}>Analyze</Button>
-        </CardContent>
-      </Card>
+tokenizer, model = load_model()
 
-      {sentimentData && (
-        <Card>
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Sentiment Distribution</h2>
-            <Bar data={sentimentData} />
-          </CardContent>
-        </Card>
-      )}
+# Get Instagram media post details
+def fetch_ig_post_details(token, media_id):
+    url = f"https://graph.facebook.com/v18.0/{media_id}"
+    params = {
+        'access_token': token,
+        'fields': 'caption,like_count,comments_count,timestamp,permalink'
+    }
+    response = requests.get(url, params=params)
+    return response.json()
 
-      {engagementData && (
-        <Card className="col-span-2">
-          <CardContent>
-            <h2 className="text-xl font-bold mb-2">Engagement Overview</h2>
-            <Line data={engagementData} />
-          </CardContent>
-        </Card>
-      )}
+# Get Instagram post comments
+def fetch_ig_comments(token, media_id):
+    url = f"https://graph.facebook.com/v18.0/{media_id}/comments"
+    params = {
+        'access_token': token,
+        'limit': 100
+    }
+    response = requests.get(url, params=params)
+    return [c["text"] for c in response.json().get("data", []) if "text" in c]
 
-      <Card className="col-span-full">
-        <CardContent>
-          <h2 className="text-xl font-bold mb-2">Comments</h2>
-          <ul className="space-y-2">
-            {comments.map((c, i) => (
-              <li key={i} className="p-2 rounded bg-gray-100">
-                <strong>{c.sentiment}:</strong> {c.text}
-              </li>
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
-    </motion.div>
-  );
-}
+# Classify sentiment
+def classify_sentiment(text):
+    inputs = tokenizer.encode_plus(text, return_tensors="pt", truncation=True)
+    outputs = model(**inputs)
+    probs = softmax(outputs.logits, dim=1)
+    score = torch.argmax(probs).item()
+    if score <= 1:
+        return "Negative"
+    elif score == 2:
+        return "Neutral"
+    else:
+        return "Positive"
+
+# Streamlit interface
+st.title("📸 Instagram Post Sentiment Analyser")
+
+token = st.text_input("🔐 Instagram Access Token", type="password")
+media_id = st.text_input("📝 Instagram Media Post ID")
+
+if token and media_id:
+    st.success("✅ Token and Media ID entered")
+    try:
+        st.info("Fetching Instagram post...")
+        post = fetch_ig_post_details(token, media_id)
+
+        if "error" in post:
+            st.error(f"Instagram API Error: {post['error']['message']}")
+        else:
+            st.subheader("🧾 Post Information")
+            st.write(f"📅 Timestamp: {post.get('timestamp', 'N/A')}")
+            st.write(f"📝 Caption: {post.get('caption', 'No caption')}")
+            st.write(f"❤️ Likes: {post.get('like_count', 'N/A')}")
+            st.write(f"💬 Total Comments: {post.get('comments_count', 'N/A')}")
+            if post.get("permalink"):
+                st.markdown(f"🔗 [View on Instagram]({post['permalink']})")
+
+            # Fetch and analyze comments
+            st.info("Analyzing comments...")
+            comments = fetch_ig_comments(token, media_id)
+            if not comments:
+                st.warning("No comments found.")
+            else:
+                sentiments = [classify_sentiment(c) for c in comments]
+                df = pd.DataFrame({"Comment": comments, "Sentiment": sentiments})
+
+                st.subheader("💬 Comment Sentiment Analysis")
+                col1, col2 = st.columns([1, 2])  # Chart and table layout
+
+                with col1:
+                    st.markdown("**Sentiment Chart**")
+                    st.bar_chart(df["Sentiment"].value_counts())
+
+                with col2:
+                    st.markdown("**Classified Comments**")
+                    st.dataframe(df)
+
+    except Exception as e:
+        st.error(f"❌ Unexpected Error: {e}")
+else:
+    st.info("Enter your access token and media post ID to begin.")
